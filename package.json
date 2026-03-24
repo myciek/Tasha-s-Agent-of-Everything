@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "oh-my-openagent": "^3.12.3",
+    "oh-my-opencode-windows-x64": "^3.12.3"
+  }
+}
