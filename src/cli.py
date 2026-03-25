@@ -2,6 +2,10 @@
 
 import argparse
 import sys
+import io
+
+# Fix Windows console encoding
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 from src.agents import ManagerAgent
 from src.logging_config import logger, setup_logging

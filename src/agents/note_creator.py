@@ -1,140 +1,395 @@
-"""Note Creator Agent - specialized in creating Obsidian notes from session content."""
+"""Note Creator Agent - creates Obsidian notes from model output."""
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.prebuilt import create_react_agent
+import re
+from pathlib import Path
 
-from src.config import GEMINI_API_KEY, GEMINI_MODEL, AGENT_CONFIG
-from src.tools import read_file, write_note, list_notes, note_exists
+from langchain_ollama import ChatOllama
+
+from src.config import AGENT_CONFIG, VAULT_PATH, NOTE_OUTPUT_PATHS
 from src.logging_config import logger
-
-# Tools for the agent
-NOTE_CREATOR_TOOLS = [read_file, write_note, list_notes, note_exists]
-
-# System prompt for Note Creator Agent
-NOTE_CREATOR_SYSTEM_PROMPT = """You are a D&D Note Creator Agent. Your job is to read session notes and create Obsidian-compatible notes.
-
-## Your Task
-1. Read the session notes provided
-2. Extract entities mentioned (NPCs, Locations, Objects, Organizations)
-3. Decide what TYPE of note to create for each entity
-4. Generate rich, Obsidian-compatible markdown content
-5. Write the notes to the vault
-
-## Note Types
-- **npc**: Non-player characters (shopkeepers, quest givers, enemies, etc.)
-- **locale**: Locations (taverns, cities, dungeons, etc.)
-- **object**: Items (weapons, artifacts, treasures, etc.)
-- **organization**: Groups (guilds, factions, cults, etc.)
-
-## Obsidian Formatting Rules
-- Use wiki-links for references: [[Note Name]]
-- Include frontmatter with type and tags
-- Use the same format as Tashas-Notes-of-Everything templates
-
-## Frontmatter Template
-```markdown
----
-type: [npc/locale/object/organization]
-locations:
-- "[[Location Name]]"
-tags:
-- tag1
-- tag2
----
-```
-
-## Example NPC Note
-```markdown
----
-type: npc
-locations:
-- "[[Baldur's Gate]]"
-tags:
-- race/human
-- job/merchant
----
-###### Tinkera Drenn
-<span class="sub2">:FasMapLocationDot: [[Baldur's Gate]] | :FasHeartPulse: Friendly </span>
-___
-
-> [!quote|no-t]
->Description of the character...
-
-> [!column|flex 3]
->> [!important]- QUESTS:
->> (Dataview query for linked quests)
->
->> [!note]- HISTORY
->> (Dataview query for session appearances)
-```
-
-## Guidelines
-- Extract as much detail as possible from context
-- Use the session context to create meaningful descriptions
-- Mark affinity as: Friendly, Hostile, Neutral, Unknown
-- Be creative but stay true to the session context
-"""
 
 
 class NoteCreatorAgent:
     """Agent that creates Obsidian notes from session content."""
     
-    def __init__(self):
-        self.llm = ChatGoogleGenerativeAI(
-            model=GEMINI_MODEL,
-            google_api_key=GEMINI_API_KEY,
+    def __init__(self, model: str = "mistral:7b"):
+        self.llm = ChatOllama(
+            model=model,
             temperature=AGENT_CONFIG["temperature"],
         )
         
-        self.agent = create_react_agent(
-            model=self.llm,
-            tools=NOTE_CREATOR_TOOLS,
-            state_modifier=NOTE_CREATOR_SYSTEM_PROMPT,
-        )
-        
-        logger.info("Note Creator Agent initialized")
+        logger.info(f"Note Creator Agent initialized with model: {model}")
     
     def run(self, session_note_path: str, dry_run: bool = False) -> dict:
-        """Run the agent on a session note.
-        
-        Args:
-            session_note_path: Path to the session note
-            dry_run: If True, don't write files
-            
-        Returns:
-            Dict with results and any notes created
-        """
+        """Run the agent on a session note."""
         logger.info(f"Note Creator processing: {session_note_path}")
         
-        # Build the task prompt
-        task = f"""Process this D&D session note and create Obsidian notes for all notable entities.
-
-Session note path: {session_note_path}
-
-Instructions:
-1. First, read the session note
-2. List existing notes to understand what's already in the vault
-3. Identify entities that should be turned into notes
-4. For each entity:
-   - Decide the type (npc, locale, object, organization)
-   - Check if it already exists
-   - Generate appropriate markdown content
-   - Write it using the write_note tool
-
-Important: Use dry_run={str(dry_run).lower()} to preview without writing if requested.
-"""
+        # Read the session note
+        content = self._read_session_note(session_note_path)
+        if not content:
+            return {"success": False, "error": f"Could not read: {session_note_path}"}
         
-        result = self.agent.invoke({"messages": [HumanMessage(content=task)]})
+        # Improved prompt - very explicit format
+        prompt = f"""You are a D&D world-building assistant. Read the session notes below and extract important entities.
+
+For EACH entity you find, output EXACTLY this format on separate lines:
+
+[NPC]
+name: <character name>
+description: <brief description of who they are>
+
+[LOCALE]
+name: <location name>
+description: <brief description of the place>
+
+[OBJECT]
+name: <item name>
+description: <brief description of the item>
+
+[ORGANIZATION]
+name: <group name>
+description: <brief description of the organization>
+
+Rules:
+- Output one entity per block
+- Use the EXACT labels shown above: [NPC], [LOCALE], [OBJECT], [ORGANIZATION]
+- The "name:" and "description:" must be on separate lines
+- Include as many entities as you find
+- If no entities of a type exist, skip that type entirely
+
+SESSION NOTES:
+{content}
+
+Extract all entities now. Write ONLY the entity blocks, nothing else:"""
+
+        response = self.llm.invoke([
+            {"role": "user", "content": prompt}
+        ])
         
-        # Extract results from messages
-        messages = result.get("messages", [])
-        last_message = messages[-1] if messages else None
+        # Parse notes
+        notes = self._parse_notes(response.content)
         
-        logger.info("Note Creator completed")
+        if not notes:
+            logger.warning("No notes extracted")
+            return {
+                "success": True,
+                "notes_created": [],
+                "message": "Could not parse notes"
+            }
+        
+        # Write notes
+        created = []
+        for note in notes:
+            if dry_run:
+                created.append(f"[DRY RUN] {note['name']}")
+            else:
+                if self._write_note(note):
+                    created.append(note['name'])
+        
+        logger.info(f"Created {len(created)} notes")
         
         return {
             "success": True,
-            "messages": messages,
-            "last_output": str(last_message.content) if last_message else "",
+            "notes_created": created,
+            "count": len(created),
         }
+    
+    def _read_session_note(self, path: str) -> str:
+        search_paths = [
+            Path(path),
+            Path.cwd() / path,
+            VAULT_PATH / path,
+            Path.cwd() / "Session Notes" / path,
+            VAULT_PATH / "Session Notes" / path,
+        ]
+        
+        for p in search_paths:
+            if p.exists() and p.is_file():
+                return p.read_text(encoding="utf-8")
+        return ""
+    
+    def _parse_notes(self, content: str) -> list:
+        notes = []
+        
+        # Split into blocks by entity type headers
+        blocks = re.split(r'\[(NPC|LOCALE|OBJECT|ORGANIZATION)\]', content)
+        
+        for i in range(1, len(blocks), 2):
+            entity_type = blocks[i].lower()
+            entity_data = blocks[i + 1] if i + 1 < len(blocks) else ""
+            
+            if entity_type == "npc":
+                note_type = "npc"
+            elif entity_type == "locale":
+                note_type = "locale"
+            elif entity_type == "object":
+                note_type = "object"
+            elif entity_type == "organization":
+                note_type = "organization"
+            else:
+                continue
+            
+            # Extract name and description
+            name_match = re.search(r'name:\s*(.+?)(?:\n|$)', entity_data, re.IGNORECASE)
+            desc_match = re.search(r'description:\s*(.+?)(?:\n\n|\[|$)', entity_data, re.IGNORECASE | re.DOTALL)
+            
+            if name_match:
+                name = name_match.group(1).strip()
+                desc = desc_match.group(1).strip() if desc_match else ""
+                
+                # Create note with template
+                note_content = self._build_note_content(note_type, name, desc)
+                
+                notes.append({
+                    "note_type": note_type,
+                    "name": name,
+                    "content": note_content
+                })
+        
+        logger.info(f"Parsed {len(notes)} notes")
+        return notes
+    
+    def _build_note_content(self, note_type: str, name: str, description: str) -> str:
+        """Build markdown content matching Obsidian Templater templates."""
+        templates = {
+            "npc": f"""---
+type: npc
+locations:
+  - "[[Unknown]]"
+tags:
+  - race/unknown
+---
+
+###### {name}
+<span class="sub2">:FasMapLocationDot: [[Unknown]] &nbsp; | &nbsp; :FasHeartPulse: Unknown </span>
+___
+
+> [!infobox|no-t right]
+> ![[portrait.jpg]]
+> ###### Details:
+> | Type | Stat |
+> | ---- | ---- |
+> | :FasBriefcase: Job | <!-- Fill in --> |
+> | :FasVenusMars: Gender | <!-- Fill in --> |
+> | :FasUser: Race | <!-- Fill in --> |
+<span class="clearfix"></span>
+
+> [!quote|no-t]
+> Profile of {name}, the NPC. {description}
+
+> [!column|flex 3]
+>> [!important]- QUESTS:
+>> ```base
+>> properties:
+>>   file.name:
+>>     displayName: Name
+>> views:
+>>   - type: table
+>>     name: Name
+>>     filters:
+>>       and:
+>>         - file.inFolder("Compendium/Party/Quests")
+>>         - file.hasLink(this.file)
+>>     order:
+>>       - file.name
+>> ```
+>
+>> [!note]- HISTORY
+>> > ```base
+>> > properties:
+>> >   file.name:
+>> >     displayName: Name
+>> > views:
+>> >   - type: table
+>> >     name: Session Notes
+>> >     filters:
+>> >       and:
+>> >         - file.inFolder("Session Notes")
+>> >         - file.hasLink(this.file)
+>> > ```
+""",
+            "locale": f"""---
+type: locale
+locations:
+  - "[[Unknown]]"
+tags:
+  - location/unknown
+---
+
+![[banner.jpg|banner]]
+###### {name}
+<span class="sub2">:FasCircleQuestion: Unknown Type</span>
+___
+
+> [!quote|no-t] SUMMARY
+>Description of the locale {name}. {description}
+
+> [!column|flex 3]
+> > [!hint]- NPC's
+> > ```base
+> > formulas:
+> >   LinkedIndirectly: |
+> >     locations.contains(this.file)
+> >     || list(locations)
+> >          .filter(file(value)
+> >            && list(file(value).properties.locations).contains(this))
+> >          .length > 0
+> > 
+> > properties:
+> >   file.name:
+> >     displayName: Name
+> > 
+> > views:
+> >   - type: table
+> >     name: This Location Only
+> >     filters:
+> >       and:
+> >         - file.inFolder("Compendium/NPC's")
+> >         - locations.contains(this.file)
+> > 
+> >   - type: table
+> >     name: Sub-Locations Included
+> >     filters:
+> >       and:
+> >         - file.inFolder("Compendium/NPC's")
+> >         - formula.LinkedIndirectly
+> > ```
+>
+>> [!example]- LOCATIONS
+>> > ```base
+>> > properties:
+>> >   file.name:
+>> >     displayName: Name
+>> > views:
+>> >   - type: table
+>> >     name: Landmarks
+>> >     filters:
+>> >       and:
+>> >         - file.inFolder("Compendium/Atlas")
+>> >         - locations.contains(this.file)
+>> > ```
+>
+>> [!note]- HISTORY
+>> > ```base
+>> > properties:
+>> >   file.name:
+>> >     displayName: Name
+>> > views:
+>> >   - type: table
+>> >     name: Session Notes
+>> >     filters:
+>> >       and:
+>> >         - file.inFolder("Session Notes")
+>> >         - file.hasLink(this.file)
+>> > ```
+""",
+            "object": f"""---
+type: object
+tags:
+  - object/unknown
+---
+
+###### {name}
+<span class="sub2">:FasCircleQuestion: Unknown Type</span>
+___
+
+> [!quote|no-t]
+>![[embed.jpg|right wm-sm]]Description of the object, {name}. {description}
+<span class="clearfix"></span>
+
+> [!column|flex 3]
+> > [!hint]- NPC's
+> > ```base
+> > properties:
+> >   file.name:
+> >     displayName: Name
+> > views:
+> >   - type: table
+> >     name: Name
+> >     filters:
+> >       and:
+> >         - file.inFolder("Compendium/NPC's")
+> >         - file.hasLink(this.file)
+> > ```
+>
+>> [!note]- HISTORY
+>> > ```base
+>> > properties:
+>> >   file.name:
+>> >     displayName: Name
+>> > views:
+>> >   - type: table
+>> >     name: Session Notes
+>> >     filters:
+>> >       and:
+>> >         - file.inFolder("Session Notes")
+>> >         - file.hasLink(this.file)
+>> > ```
+""",
+            "organization": f"""---
+type: organization
+locations:
+  - "[[Unknown]]"
+tags:
+  - 
+---
+
+###### {name}
+<span class="sub2">:FasSitemap: Organization</span>
+___
+
+> [!quote|no-t]
+>![[embed.jpg|right wm-sm]]Profile of {name}, the <!-- Fill in alignment --> aligned organization. {description}
+
+> [!column|flex 3]
+> > [!hint]- NPC's
+> > ```base
+> > properties:
+> >   file.name:
+> >     displayName: Name
+> > views:
+> >   - type: table
+> >     name: Name
+> >     filters:
+> >       and:
+> >         - file.inFolder("Compendium/NPC's")
+> >         - file.hasLink(this.file)
+> > ```
+>
+>> [!note]- HISTORY
+>> > ```base
+>> > properties:
+>> >   file.name:
+>> >     displayName: Name
+>> > views:
+>> >   - type: table
+>> >     name: Session Notes
+>> >     filters:
+>> >       and:
+>> >         - file.inFolder("Session Notes")
+>> >         - file.hasLink(this.file)
+>> > ```
+"""
+        }
+        
+        return templates.get(note_type, templates["npc"])
+    
+    def _write_note(self, note: dict) -> bool:
+        note_type = note.get("note_type")
+        name = note.get("name", "Untitled")
+        content = note.get("content", "")
+        
+        if note_type not in NOTE_OUTPUT_PATHS:
+            return False
+        
+        output_dir = VAULT_PATH / NOTE_OUTPUT_PATHS[note_type]
+        output_path = output_dir / f"{name}.md"
+        
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content, encoding="utf-8")
+            logger.info(f"Created: {output_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            return False

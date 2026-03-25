@@ -2,12 +2,12 @@
 langgraph>=0.2.0
 langgraph-checkpoint
 
-# LangChain for Google Gemini
-langchain-google-genai>=0.0.5
+# LangChain
 langchain-core>=0.3.0
 
-# Google Gemini SDK
-google-generativeai>=0.8.0
+# OpenRouter (supports free models like Llama, Mistral)
+langchain-openai
+openrouter
 
 # Environment variables
 python-dotenv>=1.0.0

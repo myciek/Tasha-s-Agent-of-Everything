@@ -9,7 +9,7 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
-from src.config import VAULT_PATH, SESSION_NOTES_PATH, NOTE_OUTPUT_PATHS
+from src.config import VAULT_PATH, SESSION_NOTES_PATH, NOTE_OUTPUT_PATHS, PROJECT_ROOT
 from src.logging_config import logger
 
 
@@ -20,32 +20,49 @@ def read_file(file_path: str) -> str:
     Use this to read session notes or any markdown files.
     
     Args:
-        file_path: Path to the file (can be absolute or relative to vault)
+        file_path: Path to the file. Can be:
+           - Absolute path
+           - Relative to the project root (where you run the app)
+           - Relative to the Obsidian vault
+           - Just a filename (will search in both locations)
         
     Returns:
         The contents of the file as a string
     """
-    # Resolve path
-    if not os.path.isabs(file_path):
-        file_path = VAULT_PATH / file_path
+    # Clean up the path
+    file_path = file_path.strip()
     
-    path = Path(file_path)
+    # Try different locations
+    search_paths = [
+        Path(file_path),  # Absolute or current directory
+        PROJECT_ROOT / file_path,  # Project root
+        VAULT_PATH / file_path,  # Vault path
+        SESSION_NOTES_PATH / file_path,  # Session notes
+    ]
     
-    if not path.exists():
-        logger.error(f"File not found: {path}")
-        return f"Error: File not found: {path}"
+    # If just a filename, search in common locations
+    if not os.path.dirname(file_path):
+        search_paths.extend([
+            PROJECT_ROOT / "Session Notes" / file_path,
+            PROJECT_ROOT / file_path,
+            VAULT_PATH / "Session Notes" / file_path,
+            SESSION_NOTES_PATH / file_path,
+        ])
     
-    if not path.is_file():
-        logger.error(f"Not a file: {path}")
-        return f"Error: Not a file: {path}"
+    # Try each path
+    for path in search_paths:
+        if path.exists() and path.is_file():
+            try:
+                content = path.read_text(encoding="utf-8")
+                logger.debug(f"Read file: {path}")
+                return content
+            except Exception as e:
+                logger.error(f"Error reading file {path}: {e}")
+                return f"Error reading file: {e}"
     
-    try:
-        content = path.read_text(encoding="utf-8")
-        logger.debug(f"Read file: {path}")
-        return content
-    except Exception as e:
-        logger.error(f"Error reading file {path}: {e}")
-        return f"Error reading file: {e}"
+    # File not found
+    logger.error(f"File not found: {file_path}")
+    return f"Error: File not found: {file_path}\n\nSearched in:\n" + "\n".join(f"  - {p}" for p in search_paths)
 
 
 @tool
