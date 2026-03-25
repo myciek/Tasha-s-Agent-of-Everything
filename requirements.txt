@@ -5,12 +5,18 @@ langgraph-checkpoint
 # LangChain
 langchain-core>=0.3.0
 
-# OpenRouter (supports free models like Llama, Mistral)
-langchain-openai
-openrouter
+# Ollama (local LLM)
+langchain-ollama
 
 # Environment variables
 python-dotenv>=1.0.0
 
 # Utilities
 pydantic>=2.0.0
+
+# Discord bot
+discord.py>=2.0.0
+PyNaCl>=1.5.0
+
+# Speech recognition
+openai-whisper
