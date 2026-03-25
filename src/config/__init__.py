@@ -34,8 +34,15 @@ NOTE_OUTPUT_PATHS = {
 # Session notes path
 SESSION_NOTES_PATH = VAULT_PATH / "Session Notes"
 
+# Shared data path for agent communication
+SHARED_DATA_PATH = PROJECT_ROOT / ".agent-data"
+EXTRACTED_ENTITIES_FILE = SHARED_DATA_PATH / "extracted_entities.json"
+
 # Agent settings
 AGENT_CONFIG = {
     "temperature": 0.7,
     "max_output_tokens": 2048,
 }
+
+# Default LLM model
+DEFAULT_MODEL = "mistral:7b"

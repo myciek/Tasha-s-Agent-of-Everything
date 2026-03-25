@@ -1,153 +1,121 @@
-"""Note Creator Agent - creates Obsidian notes from model output."""
+"""Note Creator Agent - creates Obsidian notes from extracted entities (JSON)."""
 
-import re
+import json
 from pathlib import Path
 
-from langchain_ollama import ChatOllama
-
-from src.config import AGENT_CONFIG, VAULT_PATH, NOTE_OUTPUT_PATHS
+from src.config import EXTRACTED_ENTITIES_FILE, VAULT_PATH, NOTE_OUTPUT_PATHS
 from src.logging_config import logger
 
 
 class NoteCreatorAgent:
-    """Agent that creates Obsidian notes from session content."""
+    """Agent that creates Obsidian notes from shared JSON entity data."""
     
-    def __init__(self, model: str = "mistral:7b"):
-        self.llm = ChatOllama(
-            model=model,
-            temperature=AGENT_CONFIG["temperature"],
-        )
+    def run(self, dry_run: bool = False) -> dict:
+        """Create notes from the shared extracted entities JSON."""
+        logger.info(f"Note Creator reading from: {EXTRACTED_ENTITIES_FILE}")
         
-        logger.info(f"Note Creator Agent initialized with model: {model}")
-    
-    def run(self, session_note_path: str, dry_run: bool = False) -> dict:
-        """Run the agent on a session note."""
-        logger.info(f"Note Creator processing: {session_note_path}")
+        # Read shared JSON
+        entities_data = self._read_shared_json()
+        if not entities_data:
+            return {
+                "success": False,
+                "error": f"Could not read: {EXTRACTED_ENTITIES_FILE}"
+            }
         
-        # Read the session note
-        content = self._read_session_note(session_note_path)
-        if not content:
-            return {"success": False, "error": f"Could not read: {session_note_path}"}
+        entities = entities_data.get("entities", {})
+        session_id = entities_data.get("session_id", "unknown")
         
-        # Improved prompt - very explicit format
-        prompt = f"""You are a D&D world-building assistant. Read the session notes below and extract important entities.
-
-For EACH entity you find, output EXACTLY this format on separate lines:
-
-[NPC]
-name: <character name>
-description: <brief description of who they are>
-
-[LOCALE]
-name: <location name>
-description: <brief description of the place>
-
-[OBJECT]
-name: <item name>
-description: <brief description of the item>
-
-[ORGANIZATION]
-name: <group name>
-description: <brief description of the organization>
-
-Rules:
-- Output one entity per block
-- Use the EXACT labels shown above: [NPC], [LOCALE], [OBJECT], [ORGANIZATION]
-- The "name:" and "description:" must be on separate lines
-- Include as many entities as you find
-- If no entities of a type exist, skip that type entirely
-
-SESSION NOTES:
-{content}
-
-Extract all entities now. Write ONLY the entity blocks, nothing else:"""
-
-        response = self.llm.invoke([
-            {"role": "user", "content": prompt}
-        ])
+        # Build notes from entities
+        notes = []
         
-        # Parse notes
-        notes = self._parse_notes(response.content)
+        for npc in entities.get("npcs", []):
+            notes.append({
+                "note_type": "npc",
+                "name": npc.get("name", "Unknown"),
+                "description": npc.get("description", "")
+            })
+        
+        for locale in entities.get("locales", []):
+            notes.append({
+                "note_type": "locale",
+                "name": locale.get("name", "Unknown"),
+                "description": locale.get("description", "")
+            })
+        
+        for obj in entities.get("objects", []):
+            notes.append({
+                "note_type": "object",
+                "name": obj.get("name", "Unknown"),
+                "description": obj.get("description", "")
+            })
+        
+        for org in entities.get("organizations", []):
+            notes.append({
+                "note_type": "organization",
+                "name": org.get("name", "Unknown"),
+                "description": org.get("description", "")
+            })
         
         if not notes:
-            logger.warning("No notes extracted")
+            logger.warning("No entities found in shared data")
             return {
                 "success": True,
                 "notes_created": [],
-                "message": "Could not parse notes"
+                "message": "No entities to create notes from"
             }
         
-        # Write notes
+        # Create notes
         created = []
         for note in notes:
             if dry_run:
-                created.append(f"[DRY RUN] {note['name']}")
+                created.append(f"[DRY RUN] {note['note_type']}: {note['name']}")
             else:
                 if self._write_note(note):
                     created.append(note['name'])
         
-        logger.info(f"Created {len(created)} notes")
+        logger.info(f"Created {len(created)} notes for session {session_id}")
         
         return {
             "success": True,
+            "session_id": session_id,
             "notes_created": created,
             "count": len(created),
         }
     
-    def _read_session_note(self, path: str) -> str:
-        search_paths = [
-            Path(path),
-            Path.cwd() / path,
-            VAULT_PATH / path,
-            Path.cwd() / "Session Notes" / path,
-            VAULT_PATH / "Session Notes" / path,
-        ]
+    def _read_shared_json(self) -> dict:
+        """Read entities from shared JSON file."""
+        if not EXTRACTED_ENTITIES_FILE.exists():
+            logger.error(f"Shared file not found: {EXTRACTED_ENTITIES_FILE}")
+            return {}
         
-        for p in search_paths:
-            if p.exists() and p.is_file():
-                return p.read_text(encoding="utf-8")
-        return ""
+        try:
+            return json.loads(EXTRACTED_ENTITIES_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.error(f"Failed to read shared JSON: {e}")
+            return {}
     
-    def _parse_notes(self, content: str) -> list:
-        notes = []
+    def _write_note(self, note: dict) -> bool:
+        """Write a single note to the vault."""
+        note_type = note.get("note_type")
+        name = note.get("name", "Untitled")
+        description = note.get("description", "")
         
-        # Split into blocks by entity type headers
-        blocks = re.split(r'\[(NPC|LOCALE|OBJECT|ORGANIZATION)\]', content)
+        if note_type not in NOTE_OUTPUT_PATHS:
+            return False
         
-        for i in range(1, len(blocks), 2):
-            entity_type = blocks[i].lower()
-            entity_data = blocks[i + 1] if i + 1 < len(blocks) else ""
-            
-            if entity_type == "npc":
-                note_type = "npc"
-            elif entity_type == "locale":
-                note_type = "locale"
-            elif entity_type == "object":
-                note_type = "object"
-            elif entity_type == "organization":
-                note_type = "organization"
-            else:
-                continue
-            
-            # Extract name and description
-            name_match = re.search(r'name:\s*(.+?)(?:\n|$)', entity_data, re.IGNORECASE)
-            desc_match = re.search(r'description:\s*(.+?)(?:\n\n|\[|$)', entity_data, re.IGNORECASE | re.DOTALL)
-            
-            if name_match:
-                name = name_match.group(1).strip()
-                desc = desc_match.group(1).strip() if desc_match else ""
-                
-                # Create note with template
-                note_content = self._build_note_content(note_type, name, desc)
-                
-                notes.append({
-                    "note_type": note_type,
-                    "name": name,
-                    "content": note_content
-                })
+        content = self._build_note_content(note_type, name, description)
         
-        logger.info(f"Parsed {len(notes)} notes")
-        return notes
+        output_dir = VAULT_PATH / NOTE_OUTPUT_PATHS[note_type]
+        output_path = output_dir / f"{name}.md"
+        
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content, encoding="utf-8")
+            logger.info(f"Created: {output_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error writing note: {e}")
+            return False
     
     def _build_note_content(self, note_type: str, name: str, description: str) -> str:
         """Build markdown content matching Obsidian Templater templates."""
@@ -263,10 +231,10 @@ ___
 >> > views:
 >> >   - type: table
 >> >     name: Landmarks
->> >     filters:
->> >       and:
->> >         - file.inFolder("Compendium/Atlas")
->> >         - locations.contains(this.file)
+>> >   filters:
+>> >     and:
+>> >       - file.inFolder("Compendium/Atlas")
+>> >       - locations.contains(this.file)
 >> > ```
 >
 >> [!note]- HISTORY
@@ -320,10 +288,10 @@ ___
 >> > views:
 >> >   - type: table
 >> >     name: Session Notes
->> >     filters:
->> >       and:
->> >         - file.inFolder("Session Notes")
->> >         - file.hasLink(this.file)
+>> >   filters:
+>> >     and:
+>> >       - file.inFolder("Session Notes")
+>> >       - file.hasLink(this.file)
 >> > ```
 """,
             "organization": f"""---
@@ -364,32 +332,12 @@ ___
 >> > views:
 >> >   - type: table
 >> >     name: Session Notes
->> >     filters:
->> >       and:
->> >         - file.inFolder("Session Notes")
->> >         - file.hasLink(this.file)
+>> >   filters:
+>> >     and:
+>> >       - file.inFolder("Session Notes")
+>> >       - file.hasLink(this.file)
 >> > ```
 """
         }
         
         return templates.get(note_type, templates["npc"])
-    
-    def _write_note(self, note: dict) -> bool:
-        note_type = note.get("note_type")
-        name = note.get("name", "Untitled")
-        content = note.get("content", "")
-        
-        if note_type not in NOTE_OUTPUT_PATHS:
-            return False
-        
-        output_dir = VAULT_PATH / NOTE_OUTPUT_PATHS[note_type]
-        output_path = output_dir / f"{name}.md"
-        
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(content, encoding="utf-8")
-            logger.info(f"Created: {output_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Error: {e}")
-            return False

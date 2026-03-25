@@ -3,55 +3,99 @@
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.config import AGENT_CONFIG
+from src.config import AGENT_CONFIG, DEFAULT_MODEL
 from src.logging_config import logger
+from src.agents.transcriber import TranscriberAgent
 from src.agents.note_creator import NoteCreatorAgent
 
 
 class ManagerAgent:
     """Manager agent that decides which worker to spawn."""
     
-    def __init__(self, model: str = "mistral:7b"):
+    def __init__(self, model: str = DEFAULT_MODEL):
         self.llm = ChatOllama(
             model=model,
             temperature=0.3,
         )
         
-        # Initialize workers
-        self.note_creator = NoteCreatorAgent(model=model)
+        # Workers
+        self.transcriber = TranscriberAgent(model=model)
+        self.note_creator = NoteCreatorAgent()
         
         logger.info(f"Manager Agent initialized with model: {model}")
     
     def run(self, task: str, dry_run: bool = False) -> dict:
-        """Process a task and spawn appropriate worker."""
+        """Process a task by spawning appropriate workers."""
         logger.info(f"Manager processing task: {task}")
         
-        # Extract filename from task
-        filename = task
-        if "process" in task.lower():
-            parts = task.split()
-            for part in parts:
-                if part.endswith(".md"):
-                    filename = part
-                    break
+        # Determine what needs to be done
+        action = self._decide_action(task)
         
-        # Always spawn Note Creator
-        result = self.note_creator.run(
-            session_note_path=filename,
-            dry_run=dry_run
-        )
+        if action == "transcribe_only":
+            # Just transcribe
+            result = self.transcriber.run(task)
+            return self._format_result(result, "Transcribed")
         
-        # Format response
-        if result.get("success"):
-            notes = result.get("notes_created", [])
-            count = result.get("count", 0)
+        elif action == "create_notes_only":
+            # Just create notes from existing JSON
+            result = self.note_creator.run(dry_run=dry_run)
+            return self._format_result(result, "Created notes")
+        
+        elif action == "full_pipeline":
+            # Transcribe then create notes
+            logger.info("Running full pipeline: transcribe -> create notes")
             
-            if dry_run:
-                msg = f"Would create {count} notes:\n"
-                msg += "\n".join(f"  - {n}" for n in notes)
+            # Step 1: Transcribe
+            transcribe_result = self.transcriber.run(task)
+            if not transcribe_result.get("success"):
+                return {
+                    "success": False,
+                    "error": f"Transcription failed: {transcribe_result.get('error')}"
+                }
+            
+            logger.info(f"Extracted {transcribe_result.get('total_extracted', 0)} entities")
+            
+            # Step 2: Create notes
+            notes_result = self.note_creator.run(dry_run=dry_run)
+            notes_result["transcription"] = transcribe_result
+            
+            return self._format_result(notes_result, "Processed")
+        
+        else:
+            return {
+                "success": False,
+                "error": f"Unknown action: {action}"
+            }
+    
+    def _decide_action(self, task: str) -> str:
+        """Use LLM to decide what action to take."""
+        task_lower = task.lower()
+        
+        # Simple keyword-based decision for now
+        if "transcribe" in task_lower:
+            return "transcribe_only"
+        elif "create notes" in task_lower or "create-notes" in task_lower:
+            return "create_notes_only"
+        elif ".md" in task or "session" in task_lower or "transcript" in task_lower:
+            # Default: full pipeline for session files
+            return "full_pipeline"
+        else:
+            # Default to full pipeline
+            return "full_pipeline"
+    
+    def _format_result(self, result: dict, action: str) -> dict:
+        """Format result for display."""
+        if result.get("success"):
+            count = result.get("count", 0) or result.get("total_extracted", 0)
+            notes = result.get("notes_created", [])
+            
+            if notes:
+                msg = f"{action} {count} items:\n"
+                msg += "\n".join(f"  - {n}" for n in notes[:10])
+                if len(notes) > 10:
+                    msg += f"\n  ... and {len(notes) - 10} more"
             else:
-                msg = f"Created {count} notes:\n"
-                msg += "\n".join(f"  - {n}" for n in notes)
+                msg = f"{action} successfully"
             
             result["message"] = msg
         
