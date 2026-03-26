@@ -128,13 +128,7 @@ class TranscriberAgent:
         }
     
     def _confirm_entities(self, entities: dict, ask_confirmation: Callable) -> dict:
-        """Ask user to confirm uncertain entities with rename option."""
-        confirmed = {
-            "npcs": [],
-            "locales": [],
-            "objects": [],
-            "organizations": []
-        }
+        """Interactive entity confirmation with rename and merge options."""
         
         all_entities = []
         entity_types = {
@@ -154,100 +148,131 @@ class TranscriberAgent:
                     "original_name": entity.get("name", ""),
                     "name": entity.get("name", ""),
                     "description": entity.get("description", ""),
+                    "selected": True,  # Default to selected
                 })
         
         if not all_entities:
             return entities
         
-        print(f"\n{'='*60}")
-        print(f"Found {len(all_entities)} potential entities. Please confirm:")
-        print(f"{'='*60}")
-        
-        # Group by type
-        by_type = {}
-        for e in all_entities:
-            by_type.setdefault(e["type"], []).append(e)
-        
-        for etype, items in by_type.items():
-            print(f"\n{items[0]['label'].upper()}S ({len(items)}):")
-            for i, item in enumerate(items, 1):
-                global_idx = all_entities.index(item) + 1
-                print(f"  [{global_idx}] {item['name']}")
-                if item['description']:
-                    desc_preview = item['description'][:60] + "..." if len(item['description']) > 60 else item['description']
-                    print(f"      [{desc_preview}]")
-        
-        print(f"\n{'='*60}")
-        print("Commands:")
-        print("  Enter numbers to accept (e.g., 1,3,5)")
-        print("  'a' - accept ALL")
-        print("  'n' - decline ALL")
-        print("  Type 'X newname' to rename (e.g., '3 Strad' to rename #3 to 'Strad')")
-        print("  Type 'npc' / 'loc' / 'obj' / 'org' to select by type")
-        print(f"{'='*60}\n")
-        
-        response = input("Your choice: ").strip()
-        
-        if response.lower() in ["a", "all", ""]:
-            # Accept all with original names
-            for entity in all_entities:
-                confirmed[entity["key"]].append({
-                    "name": entity["name"],
-                    "description": entity["description"],
-                })
-            return confirmed
-        
-        if response.lower() in ["n", "none"]:
-            return confirmed
-        
-        selected = {}  # name -> new_name mapping
-        
-        # Parse response
-        for part in response.split(","):
-            part = part.strip()
-            if not part:
+        # Interactive loop
+        while True:
+            print(f"\n{'='*60}")
+            print(f"Found {len(all_entities)} entities. Selected: {sum(1 for e in all_entities if e['selected'])}")
+            print(f"{'='*60}")
+            
+            # Group by type
+            by_type = {}
+            for e in all_entities:
+                by_type.setdefault(e["type"], []).append(e)
+            
+            for etype, items in by_type.items():
+                print(f"\n{items[0]['label'].upper()}S ({len(items)}):")
+                for i, item in enumerate(items, 1):
+                    global_idx = all_entities.index(item) + 1
+                    status = "✓" if item["selected"] else "✗"
+                    # Check if renamed or merged
+                    extra = ""
+                    if item["name"] != item["original_name"]:
+                        extra = f" → {item['name']}"
+                    print(f"  [{global_idx}] {status} {item['original_name']}{extra}")
+                    if item['description']:
+                        desc_preview = item['description'][:50] + "..." if len(item['description']) > 50 else item['description']
+                        print(f"       {desc_preview}")
+            
+            print(f"\n{'='*60}")
+            print("Commands:")
+            print("  Enter numbers to toggle (e.g., 1,3,5)")
+            print("  'r X newname' - rename #X to newname (e.g., 'r 3 Strad')")
+            print("  'm X Y' - merge X into Y (e.g., 'm 3 4' - keep 4, delete 3)")
+            print("  'done' or 'd' - finish and create notes")
+            print("  'cancel' or 'c' - cancel everything")
+            print(f"{'='*60}\n")
+            
+            response = input("> ").strip().lower()
+            
+            if response in ["done", "d"]:
+                break
+            
+            if response in ["cancel", "c"]:
+                print("Cancelled.")
+                return {"npcs": [], "locales": [], "objects": [], "organizations": []}
+            
+            if not response:
                 continue
             
-            # Check for rename syntax: "X newname" or "X=newname"
-            parts = part.split(None, 1)
-            if len(parts) == 2 and parts[0].isdigit():
-                # Rename case
-                idx = int(parts[0]) - 1
-                new_name = parts[1].strip()
-                if 0 <= idx < len(all_entities):
-                    old_name = all_entities[idx]["name"]
-                    selected[old_name] = new_name
-                    print(f"  ✓ Renamed '{old_name}' → '{new_name}'")
-            elif part.lower() in ["npc", "npcs"]:
-                for e in by_type.get("npc", []):
-                    if e["original_name"] not in selected:
-                        selected[e["original_name"]] = e["name"]
-            elif part.lower() in ["loc", "locs", "locale", "locales"]:
-                for e in by_type.get("locale", []):
-                    if e["original_name"] not in selected:
-                        selected[e["original_name"]] = e["name"]
-            elif part.lower() in ["obj", "objs", "object", "objects"]:
-                for e in by_type.get("object", []):
-                    if e["original_name"] not in selected:
-                        selected[e["original_name"]] = e["name"]
-            elif part.lower() in ["org", "orgs", "organization", "organizations"]:
-                for e in by_type.get("organization", []):
-                    if e["original_name"] not in selected:
-                        selected[e["original_name"]] = e["name"]
-            elif part.isdigit():
-                idx = int(part) - 1
-                if 0 <= idx < len(all_entities):
-                    entity = all_entities[idx]
-                    selected[entity["original_name"]] = entity["name"]
+            parts = response.split()
+            
+            # Handle rename: r X newname
+            if parts[0] == "r" and len(parts) >= 3:
+                try:
+                    idx = int(parts[1]) - 1
+                    new_name = " ".join(parts[2:])
+                    if 0 <= idx < len(all_entities):
+                        old_name = all_entities[idx]["original_name"]
+                        all_entities[idx]["name"] = new_name
+                        print(f"  ✓ Renamed '{old_name}' → '{new_name}'")
+                except ValueError:
+                    print("  ✗ Invalid format. Use: r X newname")
+                continue
+            
+            # Handle merge: m X Y (merge X into Y, keep Y)
+            if parts[0] == "m" and len(parts) >= 3:
+                try:
+                    idx_remove = int(parts[1]) - 1
+                    idx_keep = int(parts[2]) - 1
+                    if 0 <= idx_remove < len(all_entities) and 0 <= idx_keep < len(all_entities):
+                        removed = all_entities[idx_remove]
+                        kept = all_entities[idx_keep]
+                        if removed["type"] == kept["type"]:  # Same type required
+                            # Merge descriptions
+                            if kept["description"] and removed["description"]:
+                                kept["description"] = f"{kept['description']} {removed['description']}"
+                            elif removed["description"]:
+                                kept["description"] = removed["description"]
+                            # Merge names (prefer capitalized)
+                            if kept["name"][0].isupper() and removed["name"][0].islower():
+                                pass  # Keep capitalized version
+                            else:
+                                kept["name"] = removed["name"]
+                            kept["original_name"] = kept["name"]
+                            removed["selected"] = False  # Mark for removal
+                            print(f"  ✓ Merged '{removed['original_name']}' into '{kept['name']}'")
+                        else:
+                            print("  ✗ Can only merge same type (NPC→NPC, Loc→Loc, etc.)")
+                except ValueError:
+                    print("  ✗ Invalid format. Use: m X Y")
+                continue
+            
+            # Handle toggle
+            for part in response.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    idx = int(part) - 1
+                    if 0 <= idx < len(all_entities):
+                        all_entities[idx]["selected"] = not all_entities[idx]["selected"]
+                        status = "selected" if all_entities[idx]["selected"] else "deselected"
+                        print(f"  ✓ [{status}] {all_entities[idx]['original_name']}")
         
-        # Build confirmed list with (possibly renamed) names
+        # Build confirmed dict (deduplicate by name within each type)
+        confirmed = {
+            "npcs": [],
+            "locales": [],
+            "objects": [],
+            "organizations": []
+        }
+        
         for entity in all_entities:
-            if entity["original_name"] in selected:
-                final_name = selected[entity["original_name"]]
-                confirmed[entity["key"]].append({
-                    "name": final_name,
-                    "description": entity["description"],
-                })
+            if entity["selected"]:
+                key = entity["key"]
+                name = entity["name"]
+                # Skip if same name already added
+                if not any(e["name"].lower() == name.lower() for e in confirmed[key]):
+                    confirmed[key].append({
+                        "name": name,
+                        "description": entity["description"],
+                    })
+                else:
+                    print(f"  ⚠ Skipped duplicate: '{name}'")
         
         return confirmed
     
