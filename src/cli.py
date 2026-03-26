@@ -40,6 +40,12 @@ def main():
         help="Start chat mode"
     )
     
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Ask to confirm entities before creating notes"
+    )
+    
     args = parser.parse_args()
     
     # Set up logging
@@ -80,7 +86,7 @@ def main():
         if args.dry_run:
             print("📝 DRY RUN MODE - No files will be written\n")
         
-        result = manager.run(args.session_note, dry_run=args.dry_run)
+        result = manager.run(args.session_note, dry_run=args.dry_run, confirm=args.confirm)
         
         if result.get("success"):
             print("\n✅ Task completed!")

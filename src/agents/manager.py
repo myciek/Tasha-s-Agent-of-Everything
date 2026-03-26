@@ -24,7 +24,7 @@ class ManagerAgent:
         
         logger.info(f"Manager Agent initialized with model: {model}")
     
-    def run(self, task: str, dry_run: bool = False) -> dict:
+    def run(self, task: str, dry_run: bool = False, confirm: bool = True) -> dict:
         """Process a task by spawning appropriate workers."""
         logger.info(f"Manager processing task: {task}")
         
@@ -33,7 +33,7 @@ class ManagerAgent:
         
         if action == "transcribe_only":
             # Just transcribe
-            result = self.transcriber.run(task)
+            result = self.transcriber.run(task, ask_confirmation=input if confirm else None)
             return self._format_result(result, "Transcribed")
         
         elif action == "create_notes_only":
@@ -45,8 +45,8 @@ class ManagerAgent:
             # Transcribe then create notes
             logger.info("Running full pipeline: transcribe -> create notes")
             
-            # Step 1: Transcribe
-            transcribe_result = self.transcriber.run(task)
+            # Step 1: Transcribe (with optional confirmation)
+            transcribe_result = self.transcriber.run(task, ask_confirmation=input if confirm else None)
             if not transcribe_result.get("success"):
                 return {
                     "success": False,
