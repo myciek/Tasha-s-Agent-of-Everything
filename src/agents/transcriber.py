@@ -270,6 +270,7 @@ class TranscriberAgent:
                     confirmed[key].append({
                         "name": name,
                         "description": entity["description"],
+                        "links": entity.get("links", []),
                     })
                 else:
                     print(f"  ⚠ Skipped duplicate: '{name}'")
@@ -361,26 +362,25 @@ class TranscriberAgent:
         return all_entities
     
     def _extract_from_chunk(self, chunk: str) -> dict:
-        """Extract entities from a single chunk with context."""
-        prompt = f"""You are extracting D&D entities from a Polish transcript. For each entity, include a brief description based on context.
-
-For each entity found, provide:
-- name: the entity name (in Polish or original language)
-- description: 1-2 sentences about this entity from the transcript (what it is, what it does, key facts)
+        """Extract entities from a single chunk with Polish context and wiki-links."""
+        prompt = f"""You are extracting D&D entities from a Polish transcript. For each entity, provide:
+- name: entity name
+- description: 1-2 sentences in POLISH about this entity from the transcript
+- links: other entity names mentioned in context (for Obsidian [[wiki-links]])
 
 Example:
-- "Wampyr": "Ancient vampire who made a pact with Strada. Drains life from the entire land."
-- "Opowieści końca": "Book about beliefs regarding how death manifests in various religions. Bound in elvish skin."
-- "Monograd": "City where Koso was raised. Mentioned in an amber sarcophagus."
+- "Wampyr": {{"name": "Wampyr", "description": "Starożytny wampir, który zawarł pakt ze Stradą. Wysysa życie z całego lądu.", "links": ["Strada"]}}
+- "Opowieści końca": {{"name": "Opowieści końca", "description": "Książka o wierzeniach dotyczących śmierci w różnych religiach. Oprawiona w skórę elfa.", "links": []}}
+- "Monograd": {{"name": "Monograd", "description": "Miasto, gdzie dorastał Koso. Wspomniane w bursztynowym sarkofagu.", "links": ["Koso"]}}
 
 Extract:
 - NPCs: characters, monsters, spirits (e.g., Strada, Wampyr, licz, Indul)
-- Locales: places with names (e.g., Monograd, Madzina, biblioteka)
-- Objects: items, books, artifacts (e.g., "Opowieści końca", "Dziennik Strada")
-- Organizations: groups, factions (e.g., "Zakon Wampyra")
+- Locales: places (e.g., Monograd, Madzina, biblioteka)
+- Objects: items, books, artifacts
+- Organizations: groups, factions
 
-Output valid JSON:
-{{"npcs": [{{"name": "...", "description": "..."}}], "locales": [], "objects": [], "organizations": []}}
+Output JSON with Polish descriptions and wiki-link references:
+{{"npcs": [{{"name": "...", "description": "...po polsku...", "links": ["OtherEntity"]}}], "locales": [], "objects": [], "organizations": []}}
 
 Transcript:
 {chunk}
@@ -508,11 +508,13 @@ JSON:"""
                         if isinstance(npc, dict):
                             name = npc.get("name", "")
                             desc = npc.get("description", "")
+                            links = npc.get("links", [])
                         else:
                             name = str(npc)
                             desc = ""
+                            links = []
                         if name and name not in ["You", "Karol", "you", "narrator"]:
-                            entities["npcs"].append({"name": name, "description": desc})
+                            entities["npcs"].append({"name": name, "description": desc, "links": links})
                     break
             
             for key in locale_sources:
@@ -521,11 +523,13 @@ JSON:"""
                         if isinstance(loc, dict):
                             name = loc.get("name", "")
                             desc = loc.get("description", "")
+                            links = loc.get("links", [])
                         else:
                             name = str(loc)
                             desc = ""
+                            links = []
                         if name:
-                            entities["locales"].append({"name": name, "description": desc})
+                            entities["locales"].append({"name": name, "description": desc, "links": links})
                     break
                     
             for key in obj_sources:
@@ -534,11 +538,13 @@ JSON:"""
                         if isinstance(obj, dict):
                             name = obj.get("name", "")
                             desc = obj.get("description", "")
+                            links = obj.get("links", [])
                         else:
                             name = str(obj)
                             desc = ""
+                            links = []
                         if name:
-                            entities["objects"].append({"name": name, "description": desc})
+                            entities["objects"].append({"name": name, "description": desc, "links": links})
                     break
                     
             for key in org_sources:
@@ -547,11 +553,13 @@ JSON:"""
                         if isinstance(org, dict):
                             name = org.get("name", "")
                             desc = org.get("description", "")
+                            links = org.get("links", [])
                         else:
                             name = str(org)
                             desc = ""
+                            links = []
                         if name:
-                            entities["organizations"].append({"name": name, "description": desc})
+                            entities["organizations"].append({"name": name, "description": desc, "links": links})
                     break
             
             logger.info(f"Parsed: {len(entities['npcs'])} NPCs, {len(entities['locales'])} locales, {len(entities['objects'])} objects, {len(entities['organizations'])} orgs")
